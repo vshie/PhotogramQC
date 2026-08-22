@@ -60,7 +60,7 @@ The review UI opens at [http://localhost:5055](http://localhost:5055) unless tha
 Review state is written next to the pictures (or next to a `combined/` folder’s parent in the classic layout):
 
 - `_review_marked.json` — marked-for-delete list (auto-filled on first open from roll)
-- `_review_auto_roll.json` — threshold chosen from the roll histogram
+- `_review_auto_roll.json` — 15° roll window used on first open
 - `_review_position.json` — last scrub position
 - `_review_cache/` — resized preview cache
 
@@ -82,7 +82,7 @@ Deletes only affect the image folder you selected. Copies elsewhere are not touc
 
 If the folder has `telemetry.csv` (or another picture CSV) with time and roll, PhotogramQC uses that and does not open each image for EXIF. That is the fast path on every OS.
 
-On the first open of a folder (no `_review_marked.json` yet), it builds a 0.5° histogram from those roll values and pre-marks frames outside the downward-looking cluster. The keep window is 5–10° around the roll mode, sized from that histogram. Existing marks are never overwritten — delete `_review_marked.json` to re-run the first pass.
+On the first open of a folder (no `_review_marked.json` yet), it finds the downward-looking roll mode and pre-marks frames whose roll is more than 15° from that mode. Existing marks are never overwritten — delete `_review_marked.json` to re-run the first pass.
 
 ---
 

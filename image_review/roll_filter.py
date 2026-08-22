@@ -7,8 +7,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
-MIN_THRESHOLD_DEG = 5.0
-MAX_THRESHOLD_DEG = 10.0
+# Mark when |roll − downward mode| is greater than this.
+FIXED_THRESHOLD_DEG = 15.0
+MIN_THRESHOLD_DEG = FIXED_THRESHOLD_DEG
+MAX_THRESHOLD_DEG = FIXED_THRESHOLD_DEG
 # Walk the 0.5° histogram while a bin stays at least this fraction of the peak.
 LOBE_FLOOR_FRAC = 0.15
 
@@ -40,16 +42,16 @@ def choose_threshold(
     min_t: float = MIN_THRESHOLD_DEG,
     max_t: float = MAX_THRESHOLD_DEG,
 ) -> dict:
-    """Pick a 5–10° window from the main lobe of the roll histogram.
+    """Find the downward-looking roll mode; mark beyond a fixed 15° window.
 
     Downward-looking survey frames cluster near 0° (or a small bias). Turns
-    and inversions sit in the tails. The threshold is the half-width of the
-    main 0.5° lobe, clamped to [min_t, max_t].
+    and inversions sit in the tails. The keep window is FIXED_THRESHOLD_DEG
+    around that mode.
     """
     values = [wrap180(r) for r in rolls]
     if len(values) < 8:
         mode = 0.0
-        threshold = max_t
+        threshold = float(FIXED_THRESHOLD_DEG)
         return {
             "mode_deg": mode,
             "threshold_deg": threshold,
@@ -70,11 +72,10 @@ def choose_threshold(
         right += 1
     lobe_lo = left / 2.0
     lobe_hi = (right + 1) / 2.0
-    half = max(abs(lobe_lo - mode), abs(lobe_hi - mode))
-    threshold = min(max_t, max(min_t, round(half * 2.0) / 2.0))
+    threshold = float(FIXED_THRESHOLD_DEG)
     return {
         "mode_deg": round(mode, 3),
-        "threshold_deg": float(threshold),
+        "threshold_deg": threshold,
         "lobe_lo_deg": round(lobe_lo, 3),
         "lobe_hi_deg": round(lobe_hi, 3),
         "sample_count": len(values),
