@@ -34,39 +34,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Verifying imports...
+echo Starting PhotogramQC...
 if "%PYLAUNCHER%"=="1" (
-  py -3 -c "import flask, PIL; print('flask', flask.__version__, '| pillow', PIL.__version__)"
+  py -3 "%~dp0photogramqc.py" %*
 ) else (
-  python -c "import flask, PIL; print('flask', flask.__version__, '| pillow', PIL.__version__)"
-)
-if errorlevel 1 (
-  echo ERROR: Flask/Pillow still not importable.
-  popd
-  pause
-  exit /b 1
-)
-
-if not "%~1"=="" (
-  set "IMAGE_FOLDER=%~1"
-) else if exist "%~dp0combined\" (
-  set "IMAGE_FOLDER=%~dp0combined"
-) else (
-  set "IMAGE_FOLDER=%~dp0."
-)
-
-echo.
-echo Starting Image Review Tool on http://localhost:5055
-echo Image folder: %IMAGE_FOLDER%
-echo Also reachable on this PC's LAN IP:5055 (printed when ready).
-echo Keep this window open while reviewing. Browser opens when the server is ready.
-echo.
-
-if "%PYLAUNCHER%"=="1" (
-  py -3 "%~dp0image_review\app.py" "%IMAGE_FOLDER%"
-) else (
-  python "%~dp0image_review\app.py" "%IMAGE_FOLDER%"
+  python "%~dp0photogramqc.py" %*
 )
 
 popd
-pause

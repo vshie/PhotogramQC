@@ -86,6 +86,7 @@
       `<strong>${img.name}</strong>`,
       `<span class="dim">${state.index + 1} / ${total}</span>`,
     ];
+    if (img.timestamp) parts.push(`<span class="dim">${img.timestamp}</span>`);
     if (state.scrubbing) parts.push(`<span class="dim">scrubbing</span>`);
     if (img.waypoint) parts.push(`<span class="dim">${img.waypoint}</span>`);
     if (img.depth_m != null) parts.push(`<span class="dim">depth ${img.depth_m.toFixed(2)} m</span>`);

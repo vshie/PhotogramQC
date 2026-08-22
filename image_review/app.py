@@ -5,31 +5,49 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import socket
 import sys
 import threading
 import time
 import webbrowser
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 from PIL import Image
+from werkzeug.serving import make_server
 
 try:
     _RESAMPLE = Image.Resampling.LANCZOS
 except AttributeError:
     _RESAMPLE = Image.LANCZOS
 
-APP_DIR = Path(__file__).resolve().parent
-STATIC_DIR = APP_DIR / "static"
 
-# Survey root is parent of image_review/; combined folder passed as argv or sibling.
-SURVEY_ROOT = APP_DIR.parent
-COMBINED_DIR = SURVEY_ROOT / "combined"
+def _static_dir() -> Path:
+    """Resolve bundled static files for source runs and a frozen .exe."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        root = Path(sys._MEIPASS)
+        bundled = root / "image_review" / "static"
+        if bundled.is_dir():
+            return bundled
+        fallback = root / "static"
+        if fallback.is_dir():
+            return fallback
+    return Path(__file__).resolve().parent / "static"
+
+
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = _static_dir()
+
+# Paths are set by configure_paths() before the server starts.
+SURVEY_ROOT = Path.cwd()
+COMBINED_DIR = SURVEY_ROOT
 MANIFEST_PATH = SURVEY_ROOT / "_combine_manifest.csv"
 MARKED_PATH = SURVEY_ROOT / "_review_marked.json"
 POSITION_PATH = SURVEY_ROOT / "_review_position.json"
 CACHE_DIR = SURVEY_ROOT / "_review_cache"
+DEFAULT_PORT = 5055
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 
@@ -167,38 +185,140 @@ def _telemetry_lookup(telemetry_path: Path) -> dict[str, dict]:
     return out
 
 
-def _exif_gps(path: Path) -> tuple[float | None, float | None]:
-    """Return (lat, lon) from EXIF GPS if present."""
+def _exif_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    return str(value).strip().strip("\x00")
+
+
+def _parse_dt(value, subsec=None) -> datetime | None:
+    """Parse EXIF, telemetry, or ISO timestamps into a datetime."""
+    text = _exif_text(value)
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1]
+    dt = None
+    for fmt in (
+        "%Y:%m:%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y%m%d_%H%M%S",
+        "%Y%m%dT%H%M%S",
+    ):
+        try:
+            dt = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    extra = _exif_text(subsec)
+    if extra and dt.microsecond == 0:
+        try:
+            dt = dt.replace(microsecond=int((extra + "000000")[:6]))
+        except (TypeError, ValueError):
+            pass
+    return dt
+
+
+def _rational(value) -> float:
+    if hasattr(value, "numerator"):
+        den = float(value.denominator or 1)
+        return float(value.numerator) / den
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        return float(value[0]) / float(value[1] or 1)
+    return float(value)
+
+
+def _gps_datetime(gps: dict) -> datetime | None:
+    date_text = _exif_text(gps.get(29))
+    stamp = gps.get(7)
+    if not date_text or not stamp:
+        return None
+    try:
+        parts = list(stamp)
+        hour = _rational(parts[0])
+        minute = _rational(parts[1])
+        second = _rational(parts[2])
+        whole = int(second)
+        micro = int(round((second - whole) * 1000000))
+        raw = "%s %02d:%02d:%02d" % (date_text.replace("-", ":"), int(hour), int(minute), whole)
+        dt = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+        return dt.replace(microsecond=max(0, min(micro, 999999)))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _read_exif(path: Path) -> tuple[float | None, float | None, datetime | None]:
+    """Return (lat, lon, capture_time) from EXIF when present."""
     try:
         with Image.open(path) as im:
             exif = im._getexif() if hasattr(im, "_getexif") else None
             if not exif:
-                return None, None
+                return None, None, None
+
+            dt = None
+            subsec = exif.get(37521)  # SubSecTimeOriginal
+            for tag in (36867, 36868, 306):  # DateTimeOriginal, Digitized, DateTime
+                dt = _parse_dt(exif.get(tag), subsec)
+                if dt is not None:
+                    break
+
+            lat = lon = None
             gps = exif.get(34853)  # GPSInfo
-            if not isinstance(gps, dict):
-                return None, None
+            if isinstance(gps, dict):
+                if dt is None:
+                    dt = _gps_datetime(gps)
 
-            def _to_deg(values):
-                d, m, s = values
-                return float(d) + float(m) / 60.0 + float(s) / 3600.0
+                def _to_deg(values):
+                    d, m, s = values
+                    return float(d) + float(m) / 60.0 + float(s) / 3600.0
 
-            lat_vals = gps.get(2)
-            lon_vals = gps.get(4)
-            if not lat_vals or not lon_vals:
-                return None, None
-            lat = _to_deg(lat_vals)
-            lon = _to_deg(lon_vals)
-            if (gps.get(1) or "").upper() == "S":
-                lat = -lat
-            if (gps.get(3) or "").upper() == "W":
-                lon = -lon
-            return lat, lon
+                lat_vals = gps.get(2)
+                lon_vals = gps.get(4)
+                if lat_vals and lon_vals:
+                    lat = _to_deg(lat_vals)
+                    lon = _to_deg(lon_vals)
+                    if (_exif_text(gps.get(1)) or "").upper() == "S":
+                        lat = -lat
+                    if (_exif_text(gps.get(3)) or "").upper() == "W":
+                        lon = -lon
+            return lat, lon, dt
     except Exception:
-        return None, None
+        return None, None, None
+
+
+def _file_capture_time(path: Path) -> datetime | None:
+    """File birth time (Windows creation time) or last-write time."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    ts = getattr(st, "st_birthtime", None)
+    if ts is None and sys.platform == "win32":
+        ts = st.st_ctime
+    if ts is None:
+        ts = st.st_mtime
+    try:
+        return datetime.fromtimestamp(ts)
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def _build_catalog() -> list[dict]:
-    """Scan image folder; GPS from survey telemetry, manifest join, or EXIF."""
+    """Scan image folder; GPS from survey telemetry, manifest join, or EXIF.
+
+    Frames are ordered by capture time (EXIF, then telemetry, then file
+    created), never by filename.
+    """
     global _catalog, _by_name, _marked
 
     _marked = _load_marked()
@@ -219,14 +339,11 @@ def _build_catalog() -> list[dict]:
                 if new_name:
                     manifest_by_new[new_name] = row
 
-    images = sorted(
-        [
-            p
-            for p in COMBINED_DIR.iterdir()
-            if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-        ],
-        key=lambda p: p.name.lower(),
-    )
+    images = [
+        p
+        for p in COMBINED_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+    ]
 
     catalog: list[dict] = []
     for img in images:
@@ -256,7 +373,7 @@ def _build_catalog() -> list[dict]:
             if not waypoint and telem.get("waypoint"):
                 waypoint = telem["waypoint"]
 
-        if (lat is None or lon is None) and original_path:
+        if (lat is None or lon is None or not timestamp) and original_path:
             orig = Path(original_path)
             telem_dir = str(orig.parent)
             if telem_dir not in telem_cache:
@@ -276,12 +393,15 @@ def _build_catalog() -> list[dict]:
                 if timestamp is None:
                     timestamp = telem.get("timestamp")
 
-        if lat is None or lon is None:
-            elat, elon = _exif_gps(img)
-            if lat is None:
-                lat = elat
-            if lon is None:
-                lon = elon
+        elat, elon, exif_dt = _read_exif(img)
+        if lat is None:
+            lat = elat
+        if lon is None:
+            lon = elon
+
+        capture_dt = exif_dt or _parse_dt(timestamp) or _file_capture_time(img)
+        if timestamp is None and capture_dt is not None:
+            timestamp = capture_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         entry = {
             "name": name,
@@ -294,8 +414,19 @@ def _build_catalog() -> list[dict]:
             "heading_deg": heading,
             "timestamp": timestamp,
             "marked": name in _marked,
+            "_sort": capture_dt,
         }
         catalog.append(entry)
+
+    catalog.sort(
+        key=lambda e: (
+            e["_sort"] is None,
+            e["_sort"] or datetime.max,
+            e["name"].lower(),
+        )
+    )
+    for entry in catalog:
+        entry.pop("_sort", None)
 
     # Drop marks for files that no longer exist
     existing = {e["name"] for e in catalog}
@@ -537,61 +668,138 @@ def api_reload():
     )
 
 
-def main() -> None:
+def configure_paths(image_dir: str | Path) -> Path:
+    """Point the server at a survey image folder and set review-state paths."""
     global COMBINED_DIR, MANIFEST_PATH, MARKED_PATH, POSITION_PATH, CACHE_DIR, SURVEY_ROOT
 
-    if len(sys.argv) > 1:
-        COMBINED_DIR = Path(sys.argv[1]).resolve()
-    else:
-        COMBINED_DIR = (SURVEY_ROOT / "combined").resolve()
-
+    COMBINED_DIR = Path(image_dir).resolve()
     if not COMBINED_DIR.is_dir():
-        print(f"Combined folder not found: {COMBINED_DIR}")
-        print("Run the combine script first, or pass the combined path as an argument.")
-        sys.exit(1)
+        raise NotADirectoryError("Folder not found: %s" % COMBINED_DIR)
 
-    # Flat survey folder (images + telemetry.csv here) vs classic survey/combined/.
-    if (COMBINED_DIR / "telemetry.csv").is_file() or (COMBINED_DIR / "image_review").is_dir():
-        SURVEY_ROOT = COMBINED_DIR
-    else:
+    # Classic layout: survey/combined/*.jpg — keep review files on the survey root.
+    # Otherwise the selected folder is the survey root (images live here).
+    if COMBINED_DIR.name.lower() == "combined":
         SURVEY_ROOT = COMBINED_DIR.parent
+    else:
+        SURVEY_ROOT = COMBINED_DIR
     MANIFEST_PATH = SURVEY_ROOT / "_combine_manifest.csv"
     MARKED_PATH = SURVEY_ROOT / "_review_marked.json"
     POSITION_PATH = SURVEY_ROOT / "_review_position.json"
     CACHE_DIR = SURVEY_ROOT / "_review_cache"
+    return COMBINED_DIR
+
+
+def session_info() -> dict:
+    """Snapshot of the current folder / catalog for the status window."""
+    telem = (SURVEY_ROOT / "telemetry.csv").is_file() or (
+        COMBINED_DIR / "telemetry.csv"
+    ).is_file()
+    return {
+        "folder": str(COMBINED_DIR),
+        "survey_root": str(SURVEY_ROOT),
+        "count": len(_catalog),
+        "marked": len(_marked),
+        "has_telemetry": telem,
+        "has_manifest": MANIFEST_PATH.is_file(),
+    }
+
+
+def discover_urls(port: int) -> list[str]:
+    urls = ["http://localhost:%d" % port]
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            lan_ip = sock.getsockname()[0]
+        if lan_ip and not lan_ip.startswith("127."):
+            urls.append("http://%s:%d" % (lan_ip, port))
+    except OSError:
+        pass
+    return urls
+
+
+def find_open_port(preferred: int = DEFAULT_PORT, tries: int = 15) -> int:
+    for port in range(preferred, preferred + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise OSError("No free port found in %d–%d" % (preferred, preferred + tries - 1))
+
+
+class ReviewServer:
+    """Background Werkzeug server so the desktop window can stay responsive."""
+
+    def __init__(self, host: str = "0.0.0.0", port: int = DEFAULT_PORT) -> None:
+        self.host = host
+        self.port = port
+        self._server = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._server is not None and self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._server = make_server(self.host, self.port, app, threaded=True)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is None:
+            return
+        try:
+            self._server.shutdown()
+        except Exception:
+            pass
+        self._server = None
+        self._thread = None
+
+
+def main() -> None:
+    if len(sys.argv) > 1:
+        image_dir = Path(sys.argv[1]).resolve()
+    else:
+        sibling = (Path(__file__).resolve().parent.parent / "combined").resolve()
+        image_dir = sibling if sibling.is_dir() else Path.cwd()
+
+    try:
+        configure_paths(image_dir)
+    except NotADirectoryError as exc:
+        print(exc)
+        print("Pass the survey image folder as an argument.")
+        sys.exit(1)
 
     print("Combined: %s" % COMBINED_DIR)
     print("Building catalog (may take a minute on a network share)...")
     n = len(_build_catalog())
     print("Loaded %d images (%d previously marked)" % (n, len(_marked)))
 
-    host = "0.0.0.0"
-    port = 5055
-    local_urls = ["http://localhost:%d" % port]
-    try:
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            lan_ip = s.getsockname()[0]
-        if lan_ip and not lan_ip.startswith("127."):
-            local_urls.append("http://%s:%d" % (lan_ip, port))
-    except OSError:
-        pass
-
+    port = find_open_port(DEFAULT_PORT)
+    urls = discover_urls(port)
     print("Ready on the local network:")
-    for u in local_urls:
-        print("  %s" % u)
-    print("(Allow Python through Windows Firewall if other PCs cannot connect.)")
+    for url in urls:
+        print("  %s" % url)
+    if sys.platform == "win32":
+        print("(Allow PhotogramQC through Windows Firewall if other PCs cannot connect.)")
+    elif sys.platform == "darwin":
+        print("(Allow incoming connections if macOS asks, so other computers can connect.)")
+    else:
+        print("(If other computers cannot connect, allow this app through the firewall.)")
 
     def _open_browser():
         time.sleep(0.8)
         try:
-            webbrowser.open(local_urls[0])
+            webbrowser.open(urls[0])
         except Exception:
             pass
 
     threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host=host, port=port, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,123 @@
+name: Release
+
+# Builds a downloadable app for each OS when you push a version tag (v1.0.0)
+# or run this workflow by hand (artifacts only, no GitHub Release).
+#
+# Windows uses the same PhotogramQC.spec / onefile exe as the local
+# Build-PhotogramQC.bat path. Do not treat this job as the place to iterate
+# on Windows packaging — that stays in the spec and the bat file.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+          - os: macos-14
+            target: macos-arm64
+          - os: ubuntu-22.04
+            target: linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: linux-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(tr -d '[:space:]' < VERSION)-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Python
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # setup-python on Linux has no tkinter. Use distro Python + python3-tk.
+      - name: Linux Python with Tk
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-venv python3-tk python3-dev tcl-dev tk-dev
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+          python -c "import tkinter; print('tkinter', tkinter.TkVersion)"
+
+      - name: PyInstaller
+        run: python -m PyInstaller --noconfirm --clean PhotogramQC.spec
+
+      - name: Package download
+        shell: bash
+        run: bash scripts/package-release.sh "${{ matrix.target }}" "${{ env.VERSION }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotogramQC-${{ matrix.target }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten and checksum
+        run: |
+          mkdir -p release-files
+          find artifacts -type f -exec cp {} release-files/ \;
+          cd release-files
+          sha256sum * > SHA256SUMS.txt
+          ls -la
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-files/*
+          body: |
+            Download the build for your computer. Python is not required.
+
+            | Computer | File |
+            | --- | --- |
+            | Windows | `PhotogramQC-*-windows-x64.exe` |
+            | Mac (Apple Silicon) | `PhotogramQC-*-macos-arm64.zip` |
+            | Linux Intel/AMD 64-bit | `PhotogramQC-*-linux-x86_64.tar.gz` |
+            | Linux ARM 64-bit | `PhotogramQC-*-linux-arm64.tar.gz` |
+
+            **Windows:** double-click the `.exe` and pick the survey folder.
+
+            **Mac:** unzip, then right-click `PhotogramQC.app` → Open (Gatekeeper blocks unsigned apps). See `HOW-TO-OPEN.txt` in the zip.
+
+            **Linux:** extract, `chmod +x PhotogramQC`, then `./PhotogramQC`. See `HOW-TO-RUN.txt` in the archive.

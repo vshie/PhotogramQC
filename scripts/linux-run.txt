@@ -1,0 +1,16 @@
+PhotogramQC for Linux
+
+1. Extract this archive.
+2. Make the binary executable if needed:
+
+   chmod +x PhotogramQC
+
+3. Run it:
+
+   ./PhotogramQC
+
+Then pick the folder that contains the survey pictures.
+Close the PhotogramQC window when you are finished (that stops the server).
+
+If the window does not appear, install Tk (Debian/Ubuntu: sudo apt install python3-tk).
+The packaged app already includes Tk from the build machine; most desktops do not need extra packages.

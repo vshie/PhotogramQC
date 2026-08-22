@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+build/
+dist/
+dist-release/
 _review_cache/
 _review_marked.json
 _review_position.json

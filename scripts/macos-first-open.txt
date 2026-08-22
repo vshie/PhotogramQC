@@ -1,0 +1,13 @@
+PhotogramQC for macOS (Apple Silicon)
+
+macOS Gatekeeper blocks apps that are not signed by an Apple Developer ID.
+Use one of these the first time you open it:
+
+1. Right-click PhotogramQC.app, choose Open, then click Open again.
+2. Or in Terminal, from the folder that contains the app:
+
+   xattr -dr com.apple.quarantine PhotogramQC.app
+   open PhotogramQC.app
+
+Then pick the folder that contains the survey pictures.
+Close the PhotogramQC window when you are finished (that stops the server).
