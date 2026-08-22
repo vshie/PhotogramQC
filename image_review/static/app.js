@@ -34,6 +34,8 @@
     viewerFrame: document.getElementById("viewerFrame"),
     markBanner: document.getElementById("markBanner"),
     scrubber: document.getElementById("scrubber"),
+    scrubberWrap: document.getElementById("scrubberWrap"),
+    scrubberMarks: document.getElementById("scrubberMarks"),
     scrubberLabel: document.getElementById("scrubberLabel"),
     busyOverlay: document.getElementById("busyOverlay"),
     busyTitle: document.getElementById("busyTitle"),
@@ -65,6 +67,77 @@
     el.scrubberLabel.textContent = total
       ? `${state.index + 1} / ${total}`
       : "0 / 0";
+    paintScrubberMarks();
+  }
+
+  function paintScrubberMarks() {
+    const canvas = el.scrubberMarks;
+    const wrap = el.scrubberWrap;
+    if (!canvas || !wrap) return;
+
+    const cssW = wrap.clientWidth || 0;
+    const cssH = 10;
+    if (cssW < 2) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const pxW = Math.max(1, Math.round(cssW * dpr));
+    const pxH = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width !== pxW || canvas.height !== pxH) {
+      canvas.width = pxW;
+      canvas.height = pxH;
+    }
+
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const thumb = 22;
+    const pad = thumb / 2;
+    const x0 = pad;
+    const trackW = Math.max(1, cssW - thumb);
+    const r = cssH / 2;
+
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(x0, 0, trackW, cssH, r);
+    } else {
+      ctx.rect(x0, 0, trackW, cssH);
+    }
+    ctx.fillStyle = "#1a3a66";
+    ctx.fill();
+
+    const n = state.images.length;
+    if (!n) return;
+
+    ctx.save();
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(x0, 0, trackW, cssH, r);
+    } else {
+      ctx.rect(x0, 0, trackW, cssH);
+    }
+    ctx.clip();
+
+    const minSlice = 2;
+    let i = 0;
+    while (i < n) {
+      if (!state.images[i].marked) {
+        i += 1;
+        continue;
+      }
+      let j = i + 1;
+      while (j < n && state.images[j].marked) j += 1;
+      let x = x0 + (i / n) * trackW;
+      let w = ((j - i) / n) * trackW;
+      if (w < minSlice) {
+        w = minSlice;
+        x = Math.min(x, x0 + trackW - minSlice);
+      }
+      ctx.fillStyle = "#e5484d";
+      ctx.fillRect(x, 0, w, cssH);
+      i = j;
+    }
+    ctx.restore();
   }
 
   function updateChrome() {
@@ -479,6 +552,11 @@
     el.scrubber.addEventListener("input", onScrubInput);
     el.scrubber.addEventListener("change", onScrubEnd);
     el.scrubber.addEventListener("pointerup", onScrubEnd);
+    if (window.ResizeObserver && el.scrubberWrap) {
+      new ResizeObserver(() => paintScrubberMarks()).observe(el.scrubberWrap);
+    } else {
+      window.addEventListener("resize", paintScrubberMarks);
+    }
     el.scrubber.addEventListener("keyup", (e) => {
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         // Let range handle its own steps while focused; sync image settle

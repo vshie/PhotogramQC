@@ -30,6 +30,7 @@
         <kbd>D</kbd>/<kbd>Del</kbd> toggle mark
         <kbd>Home</kbd>/<kbd>End</kbd> jump
         High-roll frames are pre-marked on first open
+        <span>Red on the scrubber = marked for delete</span>
       </div>
     </section>
     <aside class="map-pane">
@@ -39,16 +40,19 @@
 
   <footer class="scrubber" id="scrubberBar">
     <span class="scrubber-label" id="scrubberLabel">0 / 0</span>
-    <input
-      type="range"
-      id="scrubber"
-      class="scrubber-input"
-      min="0"
-      max="0"
-      value="0"
-      step="1"
-      aria-label="Scrub through images"
-    />
+    <div class="scrubber-wrap" id="scrubberWrap">
+      <canvas class="scrubber-marks" id="scrubberMarks" aria-hidden="true"></canvas>
+      <input
+        type="range"
+        id="scrubber"
+        class="scrubber-input"
+        min="0"
+        max="0"
+        value="0"
+        step="1"
+        aria-label="Scrub through images"
+      />
+    </div>
   </footer>
 
   <div class="overlay" id="busyOverlay" hidden>
