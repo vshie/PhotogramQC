@@ -20,6 +20,7 @@ a = Analysis(
         "image_review",
         "image_review.app",
         "image_review.desktop",
+        "image_review.roll_filter",
         "flask",
         "jinja2",
         "werkzeug",

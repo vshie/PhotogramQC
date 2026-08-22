@@ -15,6 +15,7 @@
     currentMarker: null,
     lastPan: 0,
     prefetchCache: new Map(),
+    rollFilter: null,
     spaceHeld: false,
     trackDirty: false,
     scrubbing: false,
@@ -70,7 +71,8 @@
     const img = current();
     const total = state.images.length;
     const n = markedCount();
-    el.markedBadge.textContent = `${n} marked`;
+    const auto = state.rollFilter && state.rollFilter.applied;
+    el.markedBadge.textContent = auto ? `${n} marked · roll auto` : `${n} marked`;
     el.markedBadge.classList.toggle("has-marks", n > 0);
     el.deleteBtn.disabled = n === 0;
     syncScrubber();
@@ -91,6 +93,15 @@
     if (img.waypoint) parts.push(`<span class="dim">${img.waypoint}</span>`);
     if (img.depth_m != null) parts.push(`<span class="dim">depth ${img.depth_m.toFixed(2)} m</span>`);
     if (img.heading_deg != null) parts.push(`<span class="dim">hdg ${img.heading_deg.toFixed(1)}°</span>`);
+    if (img.roll_deg != null) {
+      const rf = state.rollFilter || {};
+      const mode = rf.mode_deg == null ? 0 : rf.mode_deg;
+      const limit = rf.threshold_deg;
+      const over = limit != null && Math.abs(img.roll_deg - mode) > limit;
+      parts.push(
+        `<span class="${over ? "hot" : "dim"}">roll ${img.roll_deg.toFixed(1)}°</span>`
+      );
+    }
     if (img.lat != null && img.lon != null) {
       parts.push(`<span class="dim">${img.lat.toFixed(6)}, ${img.lon.toFixed(6)}</span>`);
     }
@@ -478,6 +489,7 @@
     const res = await fetch("/api/catalog");
     const data = await res.json();
     state.images = data.images || [];
+    state.rollFilter = data.roll_filter || null;
     rebuildTrack({ fit: true });
 
     let start = 0;

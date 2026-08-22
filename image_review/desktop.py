@@ -15,6 +15,7 @@ from image_review import app as review
 
 BG = "#0a1628"
 BG_PANEL = "#0f2138"
+BG_TRACK = "#152a45"
 BLUE = "#2b7fff"
 BLUE_BRIGHT = "#5cadff"
 CYAN = "#7ef0ff"
@@ -34,6 +35,7 @@ USAGE_ROWS = (
     ("Hold Space + arrows", "Mark every frame you pass"),
     ("Home / End", "First / last image"),
     ("Delete all marked", "Permanently deletes marked files from disk"),
+    ("First open", "High-roll frames are pre-marked from telemetry"),
 )
 
 
@@ -118,6 +120,9 @@ class StatusWindow:
         self.server: review.ReviewServer | None = None
         self.urls: list[str] = []
         self._closed = False
+        self._scan_latest = None
+        self._scan_scheduled = False
+        self._progress_frac = 0.0
 
         self.root = tk.Tk()
         self.root.title("PhotogramQC")
@@ -158,7 +163,7 @@ class StatusWindow:
         self.folder_var = tk.StringVar(value=str(self.folder))
         self._wrap_label(body, self.folder_var)
 
-        self.counts_var = tk.StringVar(value="Scanning pictures…")
+        self.counts_var = tk.StringVar(value="Listing pictures…")
         tk.Label(
             body,
             textvariable=self.counts_var,
@@ -167,6 +172,19 @@ class StatusWindow:
             bg=BG,
             justify="left",
         ).pack(anchor="w", padx=18, pady=(8, 0))
+
+        self.progress_frame = tk.Frame(body, bg=BG)
+        self.progress_frame.pack(fill="x", padx=18, pady=(8, 0))
+        self.progress = tk.Canvas(
+            self.progress_frame,
+            height=12,
+            bg=BG_TRACK,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.progress.pack(fill="x")
+        self._bar = self.progress.create_rectangle(0, 0, 0, 12, fill=BLUE, width=0)
+        self.progress.bind("<Configure>", lambda _e: self._redraw_progress())
 
         self.extra_var = tk.StringVar(value="")
         tk.Label(
@@ -283,15 +301,53 @@ class StatusWindow:
         self.root.after(0, fn)
 
     def _start_session(self) -> None:
-        self.status_var.set("Scanning pictures…")
+        self.status_var.set("Listing pictures…")
+        self._set_progress_frac(0)
         thread = threading.Thread(target=self._boot_worker, daemon=True)
         thread.start()
+
+    def _on_scan_progress(self, done: int, total: int, message: str) -> None:
+        self._scan_latest = (done, total, message)
+        if self._scan_scheduled or self._closed:
+            return
+        self._scan_scheduled = True
+        self._ui(self._flush_scan_progress)
+
+    def _flush_scan_progress(self) -> None:
+        self._scan_scheduled = False
+        if self._closed or not self._scan_latest:
+            return
+        done, total, message = self._scan_latest
+        if total > 0:
+            self.counts_var.set("Scanning %s / %s" % (_fmt(done), _fmt(total)))
+            self._set_progress_frac(float(done) / float(total))
+        else:
+            self.counts_var.set(message or "Listing pictures…")
+            self._set_progress_frac(0)
+        if message:
+            self.status_var.set(message)
+
+    def _set_progress_frac(self, frac: float) -> None:
+        self._progress_frac = max(0.0, min(1.0, frac))
+        self._redraw_progress()
+
+    def _redraw_progress(self) -> None:
+        if not hasattr(self, "progress"):
+            return
+        width = self.progress.winfo_width()
+        height = self.progress.winfo_height()
+        if width < 2:
+            width = 470
+        if height < 2:
+            height = 12
+        fill = int(width * getattr(self, "_progress_frac", 0.0))
+        self.progress.coords(self._bar, 0, 0, fill, height)
 
     def _boot_worker(self) -> None:
         try:
             review.configure_paths(self.folder)
             _save_last_folder(self.folder)
-            review._build_catalog()
+            review._build_catalog(progress=self._on_scan_progress)
             info = review.session_info()
             self._ui(lambda: self._show_catalog(info))
 
@@ -314,8 +370,23 @@ class StatusWindow:
         else:
             bits.append("no telemetry.csv — map uses EXIF GPS when present")
         bits.append("playback is by capture time, not filename")
+        roll = info.get("roll_filter") or {}
+        if roll.get("matched"):
+            threshold = roll.get("threshold_deg")
+            roll_marked = roll.get("marked")
+            if roll.get("applied"):
+                bits.append(
+                    "auto-marked %s frames with |roll| > %s°"
+                    % (_fmt(int(roll_marked or 0)), _fmt_deg(threshold))
+                )
+            else:
+                bits.append(
+                    "roll filter would mark %s at ±%s° (existing marks kept)"
+                    % (_fmt(int(roll_marked or 0)), _fmt_deg(threshold))
+                )
         bits.append("review files saved in %s" % info.get("survey_root"))
         self.extra_var.set(" · ".join(bits))
+        self._set_progress_frac(1)
         self.status_var.set("Starting local server…")
 
     def _show_ready(self, info: dict) -> None:
@@ -330,12 +401,14 @@ class StatusWindow:
         else:
             self.status_var.set("Ready — open the review in your browser")
         self.open_btn.configure(state="normal")
+        self.progress_frame.pack_forget()
 
     def _show_error(self, exc: Exception) -> None:
         self.server_var.set("Server did not start")
         self.status_var.set("Error")
         self.counts_var.set(str(exc))
         self.open_btn.configure(state="disabled")
+        self.progress_frame.pack_forget()
         messagebox.showerror("PhotogramQC", str(exc), parent=self.root)
 
     def _open_browser(self) -> None:
@@ -363,6 +436,13 @@ class StatusWindow:
 
 def _fmt(n: int) -> str:
     return "{:,}".format(n)
+
+
+def _fmt_deg(value) -> str:
+    try:
+        return "%.1f" % float(value)
+    except (TypeError, ValueError):
+        return "?"
 
 
 def main() -> None:

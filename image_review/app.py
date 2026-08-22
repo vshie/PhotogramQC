@@ -18,6 +18,8 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from PIL import Image
 from werkzeug.serving import make_server
 
+from image_review import roll_filter
+
 try:
     _RESAMPLE = Image.Resampling.LANCZOS
 except AttributeError:
@@ -46,6 +48,7 @@ COMBINED_DIR = SURVEY_ROOT
 MANIFEST_PATH = SURVEY_ROOT / "_combine_manifest.csv"
 MARKED_PATH = SURVEY_ROOT / "_review_marked.json"
 POSITION_PATH = SURVEY_ROOT / "_review_position.json"
+AUTO_ROLL_PATH = SURVEY_ROOT / "_review_auto_roll.json"
 CACHE_DIR = SURVEY_ROOT / "_review_cache"
 DEFAULT_PORT = 5055
 
@@ -65,6 +68,7 @@ _delete_progress = {
     "errors": 0,
     "message": "",
 }
+_roll_filter_info: dict = {}
 
 
 def _load_marked() -> set[str]:
@@ -127,6 +131,18 @@ def _resolve_position() -> dict:
     return {"index": idx, "name": _catalog[idx]["name"]}
 
 
+def _row_float(row: dict, *keys: str):
+    for key in keys:
+        raw = row.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _telemetry_lookup(telemetry_path: Path) -> dict[str, dict]:
     """Map image filename -> telemetry fields (jpg or filename column)."""
     out: dict[str, dict] = {}
@@ -144,24 +160,18 @@ def _telemetry_lookup(telemetry_path: Path) -> dict[str, dict]:
                     continue
                 # Basename only — survey-root CSV uses final names.
                 jpg = Path(jpg).name
-                try:
-                    lat = float(row["lat"]) if row.get("lat") not in (None, "") else None
-                    lon = float(row["lon"]) if row.get("lon") not in (None, "") else None
-                except (KeyError, ValueError, TypeError):
-                    lat, lon = None, None
-                depth = None
-                heading = None
+                lat = _row_float(row, "lat")
+                lon = _row_float(row, "lon")
+                depth = _row_float(row, "depth_m")
+                heading = _row_float(row, "towfish_heading_deg")
+                roll = roll_filter.parse_float(
+                    _row_float(row, "towfish_roll_deg", "roll_deg", "roll")
+                )
+                pitch = roll_filter.parse_float(
+                    _row_float(row, "towfish_pitch_deg", "pitch_deg", "pitch")
+                )
+                tilt = _row_float(row, "camera_tilt_deg")
                 seq = None
-                try:
-                    if row.get("depth_m") not in (None, ""):
-                        depth = float(row["depth_m"])
-                except (ValueError, TypeError):
-                    pass
-                try:
-                    if row.get("towfish_heading_deg") not in (None, ""):
-                        heading = float(row["towfish_heading_deg"])
-                except (ValueError, TypeError):
-                    pass
                 try:
                     if row.get("seq") not in (None, ""):
                         seq = int(float(row["seq"]))
@@ -172,6 +182,9 @@ def _telemetry_lookup(telemetry_path: Path) -> dict[str, dict]:
                     "lon": lon,
                     "depth_m": depth,
                     "heading_deg": heading,
+                    "roll_deg": roll,
+                    "pitch_deg": pitch,
+                    "camera_tilt_deg": tilt,
                     "timestamp": (row.get("timestamp") or "").strip() or None,
                     "seq": seq,
                     "source_folder": (
@@ -257,13 +270,20 @@ def _gps_datetime(gps: dict) -> datetime | None:
         return None
 
 
-def _read_exif(path: Path) -> tuple[float | None, float | None, datetime | None]:
-    """Return (lat, lon, capture_time) from EXIF when present."""
+def _read_exif(path: Path) -> tuple[float | None, float | None, datetime | None, float | None]:
+    """Return (lat, lon, capture_time, roll_deg) from EXIF/XMP when present."""
     try:
         with Image.open(path) as im:
+            named = im.getexif() if hasattr(im, "getexif") else None
             exif = im._getexif() if hasattr(im, "_getexif") else None
+            desc = None
+            if named is not None:
+                desc = named.get(270)
+            if desc is None and exif:
+                desc = exif.get(270)
+            roll = roll_filter.roll_from_description(desc)
             if not exif:
-                return None, None, None
+                return None, None, None, roll
 
             dt = None
             subsec = exif.get(37521)  # SubSecTimeOriginal
@@ -291,9 +311,9 @@ def _read_exif(path: Path) -> tuple[float | None, float | None, datetime | None]
                         lat = -lat
                     if (_exif_text(gps.get(3)) or "").upper() == "W":
                         lon = -lon
-            return lat, lon, dt
+            return lat, lon, dt, roll
     except Exception:
-        return None, None, None
+        return None, None, None, None
 
 
 def _file_capture_time(path: Path) -> datetime | None:
@@ -313,16 +333,27 @@ def _file_capture_time(path: Path) -> datetime | None:
         return None
 
 
-def _build_catalog() -> list[dict]:
+def _build_catalog(progress=None) -> list[dict]:
     """Scan image folder; GPS from survey telemetry, manifest join, or EXIF.
 
     Frames are ordered by capture time (EXIF, then telemetry, then file
     created), never by filename.
     """
-    global _catalog, _by_name, _marked
+    global _catalog, _by_name, _marked, _roll_filter_info
+
+    def report(done: int, total: int, message: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(done, total, message)
+        except Exception:
+            pass
 
     _marked = _load_marked()
+    _roll_filter_info = {}
     telem_cache: dict[str, dict[str, dict]] = {}  # dir path -> jpg -> fields
+
+    report(0, 0, "Listing pictures…")
 
     # Prefer survey-root telemetry.csv keyed by final filename (new single-folder layout).
     root_telem = _telemetry_lookup(SURVEY_ROOT / "telemetry.csv")
@@ -344,9 +375,11 @@ def _build_catalog() -> list[dict]:
         for p in COMBINED_DIR.iterdir()
         if p.is_file() and p.suffix.lower() in IMAGE_EXTS
     ]
+    total = len(images)
+    report(0, total, "Scanning pictures…")
 
     catalog: list[dict] = []
-    for img in images:
+    for i, img in enumerate(images, start=1):
         name = img.name
         row = manifest_by_new.get(name, {})
         original_path = (row.get("original_path") or "").strip()
@@ -358,6 +391,7 @@ def _build_catalog() -> list[dict]:
             seq = None
 
         lat = lon = depth = heading = timestamp = None
+        roll = pitch = tilt = None
 
         telem = root_telem.get(name)
         if telem:
@@ -365,6 +399,9 @@ def _build_catalog() -> list[dict]:
             lon = telem.get("lon")
             depth = telem.get("depth_m")
             heading = telem.get("heading_deg")
+            roll = telem.get("roll_deg")
+            pitch = telem.get("pitch_deg")
+            tilt = telem.get("camera_tilt_deg")
             timestamp = telem.get("timestamp")
             if seq is None:
                 seq = telem.get("seq")
@@ -373,7 +410,7 @@ def _build_catalog() -> list[dict]:
             if not waypoint and telem.get("waypoint"):
                 waypoint = telem["waypoint"]
 
-        if (lat is None or lon is None or not timestamp) and original_path:
+        if (lat is None or lon is None or roll is None or not timestamp) and original_path:
             orig = Path(original_path)
             telem_dir = str(orig.parent)
             if telem_dir not in telem_cache:
@@ -390,14 +427,22 @@ def _build_catalog() -> list[dict]:
                     depth = telem.get("depth_m")
                 if heading is None:
                     heading = telem.get("heading_deg")
+                if roll is None:
+                    roll = telem.get("roll_deg")
+                if pitch is None:
+                    pitch = telem.get("pitch_deg")
+                if tilt is None:
+                    tilt = telem.get("camera_tilt_deg")
                 if timestamp is None:
                     timestamp = telem.get("timestamp")
 
-        elat, elon, exif_dt = _read_exif(img)
+        elat, elon, exif_dt, exif_roll = _read_exif(img)
         if lat is None:
             lat = elat
         if lon is None:
             lon = elon
+        if roll is None:
+            roll = exif_roll
 
         capture_dt = exif_dt or _parse_dt(timestamp) or _file_capture_time(img)
         if timestamp is None and capture_dt is not None:
@@ -412,12 +457,18 @@ def _build_catalog() -> list[dict]:
             "lon": lon,
             "depth_m": depth,
             "heading_deg": heading,
+            "roll_deg": roll,
+            "pitch_deg": pitch,
+            "camera_tilt_deg": tilt,
             "timestamp": timestamp,
             "marked": name in _marked,
             "_sort": capture_dt,
         }
         catalog.append(entry)
+        if i == 1 or i == total or i % 5 == 0:
+            report(i, total, "Reading EXIF %s / %s" % (i, total))
 
+    report(total, total, "Ordering by capture time…")
     catalog.sort(
         key=lambda e: (
             e["_sort"] is None,
@@ -437,9 +488,70 @@ def _build_catalog() -> list[dict]:
         for e in catalog:
             e["marked"] = e["name"] in _marked
 
+    report(total, total, "Applying roll filter…")
+    _apply_roll_filter(catalog)
+
     _catalog = catalog
     _by_name = {e["name"]: e for e in catalog}
+    report(total, total, "Scan complete")
     return catalog
+
+
+def _public_roll_info(suggestion: dict, source: str, applied: bool) -> dict:
+    info = {
+        "source": source,
+        "applied": applied,
+        "mode_deg": suggestion.get("mode_deg"),
+        "threshold_deg": suggestion.get("threshold_deg"),
+        "lobe_lo_deg": suggestion.get("lobe_lo_deg"),
+        "lobe_hi_deg": suggestion.get("lobe_hi_deg"),
+        "matched": suggestion.get("matched", 0),
+        "marked": suggestion.get("marked", 0),
+        "kept": suggestion.get("kept", 0),
+        "sample_count": suggestion.get("sample_count", 0),
+    }
+    return info
+
+
+def _apply_roll_filter(catalog: list[dict]) -> None:
+    """On first open, pre-mark frames whose roll is outside the downward window."""
+    global _marked, _roll_filter_info
+
+    suggestion = roll_filter.suggest_marks(catalog)
+    source = "telemetry.csv"
+    if not (SURVEY_ROOT / "telemetry.csv").is_file() and not (
+        COMBINED_DIR / "telemetry.csv"
+    ).is_file():
+        source = "exif"
+    if not suggestion.get("matched"):
+        _roll_filter_info = _public_roll_info(suggestion, source, False)
+        return
+
+    apply = not MARKED_PATH.is_file()
+    if apply:
+        _marked = set(suggestion["names"])
+        for entry in catalog:
+            entry["marked"] = entry["name"] in _marked
+        _save_marked()
+        info = _public_roll_info(suggestion, source, True)
+        try:
+            AUTO_ROLL_PATH.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        print(
+            "Auto-marked %d of %d images (|roll| > %.1f° from %s)"
+            % (
+                info["marked"],
+                info["matched"],
+                info["threshold_deg"],
+                source,
+            ),
+            flush=True,
+        )
+        _roll_filter_info = info
+        return
+
+    _roll_filter_info = _public_roll_info(suggestion, source, AUTO_ROLL_PATH.is_file())
 
 
 def _safe_name(name: str) -> str | None:
@@ -496,6 +608,7 @@ def api_catalog():
             "count": len(_catalog),
             "marked_count": len(_marked),
             "position": _resolve_position(),
+            "roll_filter": _roll_filter_info,
             "images": _catalog,
         }
     )
@@ -663,6 +776,7 @@ def api_reload():
         {
             "count": len(catalog),
             "marked_count": len(_marked),
+            "roll_filter": _roll_filter_info,
             "images": catalog,
         }
     )
@@ -670,7 +784,8 @@ def api_reload():
 
 def configure_paths(image_dir: str | Path) -> Path:
     """Point the server at a survey image folder and set review-state paths."""
-    global COMBINED_DIR, MANIFEST_PATH, MARKED_PATH, POSITION_PATH, CACHE_DIR, SURVEY_ROOT
+    global COMBINED_DIR, MANIFEST_PATH, MARKED_PATH, POSITION_PATH
+    global AUTO_ROLL_PATH, CACHE_DIR, SURVEY_ROOT, _roll_filter_info
 
     COMBINED_DIR = Path(image_dir).resolve()
     if not COMBINED_DIR.is_dir():
@@ -685,7 +800,9 @@ def configure_paths(image_dir: str | Path) -> Path:
     MANIFEST_PATH = SURVEY_ROOT / "_combine_manifest.csv"
     MARKED_PATH = SURVEY_ROOT / "_review_marked.json"
     POSITION_PATH = SURVEY_ROOT / "_review_position.json"
+    AUTO_ROLL_PATH = SURVEY_ROOT / "_review_auto_roll.json"
     CACHE_DIR = SURVEY_ROOT / "_review_cache"
+    _roll_filter_info = {}
     return COMBINED_DIR
 
 
@@ -701,6 +818,7 @@ def session_info() -> dict:
         "marked": len(_marked),
         "has_telemetry": telem,
         "has_manifest": MANIFEST_PATH.is_file(),
+        "roll_filter": dict(_roll_filter_info),
     }
 
 
@@ -777,7 +895,7 @@ def main() -> None:
     print("Combined: %s" % COMBINED_DIR)
     print("Building catalog (may take a minute on a network share)...")
     n = len(_build_catalog())
-    print("Loaded %d images (%d previously marked)" % (n, len(_marked)))
+    print("Loaded %d images (%d marked)" % (n, len(_marked)))
 
     port = find_open_port(DEFAULT_PORT)
     urls = discover_urls(port)

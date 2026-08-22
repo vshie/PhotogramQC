@@ -53,12 +53,13 @@ The review UI opens at [http://localhost:5055](http://localhost:5055) unless tha
 | Item | Role |
 | --- | --- |
 | `*.jpg` / `*.jpeg` / `*.png` / `*.tif` | Images to review (flat folder). Playback is by EXIF/capture time, not filename. |
-| `telemetry.csv` (optional) | Map positions — columns `filename` (or `jpg`), `lat`, `lon` |
-| EXIF GPS (optional) | Used when telemetry has no match for a frame |
+| `telemetry.csv` (optional) | Map positions and first-pass roll tags — `filename` (or `jpg`), `lat`, `lon`, `towfish_roll_deg` |
+| EXIF GPS / roll (optional) | Used when telemetry has no match for a frame (`ImageDescription` `roll=` or XMP `Camera:Roll`) |
 
 Review state is written next to the pictures (or next to a `combined/` folder’s parent in the classic layout):
 
-- `_review_marked.json` — marked-for-delete list
+- `_review_marked.json` — marked-for-delete list (auto-filled on first open from roll)
+- `_review_auto_roll.json` — threshold chosen from the roll histogram
 - `_review_position.json` — last scrub position
 - `_review_cache/` — resized preview cache
 
@@ -77,6 +78,8 @@ Review state is written next to the pictures (or next to a `combined/` folder’
 | **Delete all marked** | Permanently deletes marked files from disk |
 
 Deletes only affect the image folder you selected. Copies elsewhere are not touched.
+
+On the first open of a folder (no `_review_marked.json` yet), PhotogramQC reads `towfish_roll_deg` from `telemetry.csv`, builds a 0.5° histogram, and pre-marks frames outside the downward-looking cluster. The keep window is 5–10° around the roll mode, sized from that histogram. Existing marks are never overwritten — delete `_review_marked.json` to re-run the first pass.
 
 ---
 
