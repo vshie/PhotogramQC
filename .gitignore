@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+_review_cache/
+_review_marked.json
+_review_position.json
+combined/
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+telemetry.csv
+_combine_manifest.csv
+.DS_Store
+Thumbs.db

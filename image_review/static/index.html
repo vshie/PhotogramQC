@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Review</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Image Review</div>
+    <div class="meta" id="meta">Loading…</div>
+    <div class="actions">
+      <span class="badge" id="markedBadge">0 marked</span>
+      <button type="button" class="btn danger" id="deleteBtn" disabled>Delete all marked</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="viewer-pane" id="viewerPane">
+      <div class="viewer-frame" id="viewerFrame">
+        <img id="mainImage" alt="Survey image" draggable="false" />
+        <div class="mark-banner" id="markBanner" hidden>MARKED FOR DELETION</div>
+      </div>
+      <div class="hints">
+        <kbd>←</kbd><kbd>→</kbd> navigate
+        <kbd>Shift</kbd>+arrows jump ×10
+        <kbd>Space</kbd> hold + arrows to mark all seen
+        <kbd>D</kbd>/<kbd>Del</kbd> toggle mark
+        <kbd>Home</kbd>/<kbd>End</kbd> jump
+      </div>
+    </section>
+    <aside class="map-pane">
+      <div id="map"></div>
+    </aside>
+  </main>
+
+  <footer class="scrubber" id="scrubberBar">
+    <span class="scrubber-label" id="scrubberLabel">0 / 0</span>
+    <input
+      type="range"
+      id="scrubber"
+      class="scrubber-input"
+      min="0"
+      max="0"
+      value="0"
+      step="1"
+      aria-label="Scrub through images"
+    />
+  </footer>
+
+  <div class="overlay" id="busyOverlay" hidden>
+    <div class="overlay-card">
+      <div class="overlay-title" id="busyTitle">Working…</div>
+      <div class="overlay-msg" id="busyMsg">Please wait</div>
+      <div class="overlay-bar"><div class="overlay-bar-fill" id="busyBar"></div></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
