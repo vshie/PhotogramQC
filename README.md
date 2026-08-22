@@ -52,9 +52,10 @@ The review UI opens at [http://localhost:5055](http://localhost:5055) unless tha
 
 | Item | Role |
 | --- | --- |
-| `*.jpg` / `*.jpeg` / `*.png` / `*.tif` | Images to review (flat folder). Playback is by EXIF/capture time, not filename. |
-| `telemetry.csv` (optional) | Map positions and first-pass roll tags — `filename` (or `jpg`), `lat`, `lon`, `towfish_roll_deg` |
-| EXIF GPS / roll (optional) | Used when telemetry has no match for a frame (`ImageDescription` `roll=` or XMP `Camera:Roll`) |
+| `*.jpg` / `*.jpeg` / `*.png` / `*.tif` | Images to review (flat folder). Playback is by capture time, not filename. |
+| `telemetry.csv` (preferred) | Time, roll, and map — `filename` (or `jpg`), `timestamp`, `towfish_roll_deg`, `lat`, `lon` |
+| Other `*.csv` | Used if `telemetry.csv` is missing and the file has a filename column plus time or roll |
+| EXIF GPS / roll (fallback) | Only for frames the CSV does not cover |
 
 Review state is written next to the pictures (or next to a `combined/` folder’s parent in the classic layout):
 
@@ -79,14 +80,17 @@ Review state is written next to the pictures (or next to a `combined/` folder’
 
 Deletes only affect the image folder you selected. Copies elsewhere are not touched.
 
-On the first open of a folder (no `_review_marked.json` yet), PhotogramQC reads `towfish_roll_deg` from `telemetry.csv`, builds a 0.5° histogram, and pre-marks frames outside the downward-looking cluster. The keep window is 5–10° around the roll mode, sized from that histogram. Existing marks are never overwritten — delete `_review_marked.json` to re-run the first pass.
+If the folder has `telemetry.csv` (or another picture CSV) with time and roll, PhotogramQC uses that and does not open each image for EXIF. That is the fast path on every OS.
+
+On the first open of a folder (no `_review_marked.json` yet), it builds a 0.5° histogram from those roll values and pre-marks frames outside the downward-looking cluster. The keep window is 5–10° around the roll mode, sized from that histogram. Existing marks are never overwritten — delete `_review_marked.json` to re-run the first pass.
 
 ---
 
 ## 4. Map / GPS notes
 
-- Prefer a survey-root `telemetry.csv` with final image names in `filename` (or `jpg`) plus `lat` / `lon`.
-- If telemetry is missing for a frame, PhotogramQC falls back to EXIF GPS.
+- Prefer a survey-root `telemetry.csv` with final image names in `filename` (or `jpg`), plus `timestamp`, `towfish_roll_deg`, and `lat` / `lon`.
+- Time aliases also accepted: `time`, `datetime`, `capture_time`, `gps_time`.
+- If a frame is missing from the CSV, PhotogramQC falls back to EXIF for that file only.
 - Map tiles need internet (Esri World Imagery via Leaflet).
 - Another computer on your LAN can open the address shown in the status window if the firewall allows it.
 

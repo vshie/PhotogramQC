@@ -365,10 +365,18 @@ class StatusWindow:
         marked = int(info.get("marked") or 0)
         self.counts_var.set("%s images  ·  %s marked" % (_fmt(count), _fmt(marked)))
         bits = []
-        if info.get("has_telemetry"):
-            bits.append("telemetry.csv found")
+        csv_name = info.get("csv_name")
+        exif_reads = int(info.get("exif_reads") or 0)
+        if csv_name:
+            if exif_reads == 0:
+                bits.append("%s used for time and roll (skipped picture EXIF)" % csv_name)
+            else:
+                bits.append(
+                    "%s used for time and roll · EXIF on %s unmatched frames"
+                    % (csv_name, _fmt(exif_reads))
+                )
         else:
-            bits.append("no telemetry.csv — map uses EXIF GPS when present")
+            bits.append("no picture CSV — time and roll come from EXIF when present")
         bits.append("playback is by capture time, not filename")
         roll = info.get("roll_filter") or {}
         if roll.get("matched"):
