@@ -550,7 +550,11 @@ def main() -> None:
         print("Run the combine script first, or pass the combined path as an argument.")
         sys.exit(1)
 
-    SURVEY_ROOT = COMBINED_DIR.parent
+    # Flat survey folder (images + telemetry.csv here) vs classic survey/combined/.
+    if (COMBINED_DIR / "telemetry.csv").is_file() or (COMBINED_DIR / "image_review").is_dir():
+        SURVEY_ROOT = COMBINED_DIR
+    else:
+        SURVEY_ROOT = COMBINED_DIR.parent
     MANIFEST_PATH = SURVEY_ROOT / "_combine_manifest.csv"
     MARKED_PATH = SURVEY_ROOT / "_review_marked.json"
     POSITION_PATH = SURVEY_ROOT / "_review_position.json"
